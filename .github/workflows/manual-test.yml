@@ -1,0 +1,307 @@
+name: Manual Test
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANUAL ONLY. There is deliberately no `push` / `pull_request` / `schedule`
+# trigger, so this workflow never fires on its own. It starts only when someone
+# asks for it:
+#
+#   * GitHub UI → Actions → "Manual Test" → "Run workflow"
+#   * CLI       → gh workflow run manual-test.yml
+#
+# It re-runs the project's documented verification gate (README §Verification:
+# `npm audit`, `npx tsc --noEmit`, `npm run lint`, `npm run build`) and then
+# smoke-tests the result, so a green run means the app still installs,
+# type-checks, lints, builds and serves without errors.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      node_version:
+        description: Node.js version to run the checks with
+        type: choice
+        default: "22"
+        options:
+          - "20"
+          - "22"
+          - "24"
+      strict_audit:
+        description: Fail on ANY npm audit finding (off = fail only on high/critical)
+        type: boolean
+        default: false
+      run_dev_smoke:
+        description: Also boot `next dev` and request every route over HTTP
+        type: boolean
+        default: true
+
+# One manual run per branch at a time; a second request waits instead of racing.
+concurrency:
+  group: manual-test-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  # ── 1. Verification gate: install → audit → typecheck → lint → build ───────
+  verify:
+    name: Install, typecheck, lint, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ inputs.node_version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: Show toolchain versions
+        run: |
+          echo "node $(node --version)"
+          echo "npm  $(npm --version)"
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Dependency vulnerability audit
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.strict_audit }}" = "true" ]; then
+            level=low
+          else
+            level=high
+          fi
+          echo "npm audit --audit-level=$level"
+          npm audit --audit-level="$level"
+
+      - name: Typecheck (tsc --noEmit)
+        run: npx tsc --noEmit
+
+      - name: Lint (eslint)
+        run: npm run lint
+
+      - name: Production build (static export → out/)
+        run: npm run build
+
+      - name: Assert static export output
+        run: |
+          set -euo pipefail
+          failures=0
+          for file in \
+            out/index.html \
+            out/analytics/index.html \
+            out/rejection/index.html \
+            out/rework/index.html \
+            out/fqc-fallout/index.html \
+            out/reports/index.html \
+            out/settings/index.html \
+            out/404.html
+          do
+            if [ -s "$file" ]; then
+              echo "OK   $file"
+            else
+              echo "FAIL $file is missing or empty"
+              failures=$((failures + 1))
+            fi
+          done
+
+          js_count=$(find out/_next -name '*.js' | wc -l)
+          css_count=$(find out/_next -name '*.css' | wc -l)
+          echo "assets: $js_count js, $css_count css"
+          if [ "$js_count" -eq 0 ]; then
+            echo "FAIL no JS bundles were emitted"
+            failures=$((failures + 1))
+          fi
+          if [ "$css_count" -eq 0 ]; then
+            echo "FAIL no CSS was emitted"
+            failures=$((failures + 1))
+          fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::static export is incomplete ($failures problem(s))"
+            exit 1
+          fi
+          echo "static export looks complete"
+
+      # Serve the exported site the way a static host would and walk every
+      # route. Catches a 200 that renders nothing, and dead asset URLs.
+      - name: Smoke test the served build
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8181 --directory out > /tmp/http.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          # Readiness probe: ANY http status means the server is up, so a broken
+          # page is reported by the route checks below rather than as a timeout.
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8181/ 2>/dev/null || true)
+            case "$code" in
+              "" | 000*) sleep 1 ;;
+              *) break ;;
+            esac
+          done
+
+          failures=0
+          check () {
+            route="$1"
+            code=$(curl -sS -o /tmp/page.html -w '%{http_code}' "http://127.0.0.1:8181$route" || echo 000)
+            if [ "$code" != "200" ]; then
+              echo "FAIL $route → HTTP $code"
+              failures=$((failures + 1))
+              return
+            fi
+            if ! grep -q 'Internal Line Quality Portal' /tmp/page.html; then
+              echo "FAIL $route → HTTP 200 but the app shell did not render"
+              failures=$((failures + 1))
+              return
+            fi
+            echo "OK   $route → 200"
+          }
+
+          for route in / /analytics/ /rejection/ /rework/ /fqc-fallout/ /reports/ /settings/; do
+            check "$route"
+          done
+
+          # One bundle referenced by the served HTML must actually download.
+          asset=$(grep -o '/_next/static/[^"]*\.js' /tmp/page.html | head -n 1 || true)
+          if [ -z "$asset" ]; then
+            echo "FAIL no /_next/static/*.js reference found in the served HTML"
+            failures=$((failures + 1))
+          else
+            code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:8181$asset")
+            if [ "$code" = "200" ]; then
+              echo "OK   $asset → 200"
+            else
+              echo "FAIL $asset → HTTP $code"
+              failures=$((failures + 1))
+            fi
+          fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::$failures smoke-test failure(s)"
+            exit 1
+          fi
+          echo "smoke test passed"
+
+      - name: Upload static export artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-export
+          path: out
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "### Manual Test — verification gate"
+            echo ""
+            echo "Ref \`${{ github.ref_name }}\` · Node \`${{ inputs.node_version }}\`"
+            echo ""
+            echo "| Check | Command | Result |"
+            echo "| --- | --- | --- |"
+            echo "| Dependencies | \`npm ci\` | ${{ job.status }} |"
+            echo "| Vulnerabilities | \`npm audit\` | included above |"
+            echo "| Types | \`npx tsc --noEmit\` | included above |"
+            echo "| Lint | \`npm run lint\` | included above |"
+            echo "| Build | \`npm run build\` | included above |"
+            echo "| Smoke | static \`out/\` over HTTP | included above |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 2. Optional: boot `next dev` and request every route ──────────────────
+  dev-smoke:
+    name: Dev server route smoke test
+    if: ${{ inputs.run_dev_smoke }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ inputs.node_version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Boot next dev
+        run: |
+          set -euo pipefail
+          nohup npm run dev > /tmp/dev.log 2>&1 &
+          echo $! > /tmp/dev.pid
+          echo "dev server pid $(cat /tmp/dev.pid)"
+
+      - name: Request every route from the dev server
+        run: |
+          set -euo pipefail
+
+          up=0
+          for _ in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/ 2>/dev/null || true)
+            case "$code" in
+              "" | 000*) sleep 2 ;;
+              *) up=1; break ;;
+            esac
+          done
+          if [ "$up" -ne 1 ]; then
+            echo "::error::next dev never answered on port 3000"
+            echo "---- dev log ----"
+            tail -n 120 /tmp/dev.log
+            exit 1
+          fi
+          echo "dev server answered on port 3000"
+
+          failures=0
+          for route in / /analytics/ /rejection/ /rework/ /fqc-fallout/ /reports/ /settings/; do
+            code=$(curl -sS -o /tmp/page.html -w '%{http_code}' "http://127.0.0.1:3000$route" || echo 000)
+            if [ "$code" != "200" ]; then
+              echo "FAIL $route → HTTP $code"
+              failures=$((failures + 1))
+              continue
+            fi
+            if ! grep -q 'Internal Line Quality Portal' /tmp/page.html; then
+              echo "FAIL $route → HTTP 200 but the page did not render"
+              failures=$((failures + 1))
+              continue
+            fi
+            echo "OK   $route → 200"
+          done
+
+          # Next prints a banner on compile/runtime failure; a clean log has none.
+          if grep -qE 'Failed to compile|Unhandled Runtime Error|⨯' /tmp/dev.log; then
+            echo "::error::the dev server logged an error"
+            grep -nE 'Failed to compile|Unhandled Runtime Error|⨯' /tmp/dev.log | head -n 20
+            failures=$((failures + 1))
+          fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::$failures dev-smoke failure(s)"
+            exit 1
+          fi
+          echo "dev smoke test passed"
+
+      - name: Show dev server log
+        if: always()
+        run: tail -n 120 /tmp/dev.log 2>/dev/null || echo "no dev log was produced"
+
+      - name: Stop dev server
+        if: always()
+        run: |
+          pkill -f '[n]ext dev' 2>/dev/null || true
+          pkill -f '[n]ext-server' 2>/dev/null || true
+          if [ -f /tmp/dev.pid ]; then
+            kill "$(cat /tmp/dev.pid)" 2>/dev/null || true
+          fi
+          echo "dev server stopped"
