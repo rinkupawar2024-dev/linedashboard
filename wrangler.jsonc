@@ -1,0 +1,8 @@
+{
+  "name": "linedashboard",
+  "compatibility_date": "2026-09-18",
+  "assets": {
+    "directory": "./out",
+    "html_handling": "auto-trailing-slash"
+  }
+}

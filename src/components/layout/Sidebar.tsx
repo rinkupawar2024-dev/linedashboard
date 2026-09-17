@@ -90,7 +90,12 @@ export function Sidebar() {
           Main Navigation
         </div>
         {NAV_ITEMS.map((item) => {
-          const isActive = pathname === item.href;
+          const normalizedPathname = (pathname || '/').toLowerCase().replace(/\/+$/, '') || '/';
+          const normalizedHref = (item.href || '/').toLowerCase().replace(/\/+$/, '') || '/';
+          const isActive =
+            normalizedHref === '/'
+              ? normalizedPathname === '/'
+              : normalizedPathname === normalizedHref || normalizedPathname.startsWith(`${normalizedHref}/`);
           const Icon = item.icon;
 
           return (
