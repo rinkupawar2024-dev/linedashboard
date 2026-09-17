@@ -1,4 +1,3 @@
-import React from 'react';
 import { UploadCloud, FileSpreadsheet } from 'lucide-react';
 
 interface NoDataStateProps {

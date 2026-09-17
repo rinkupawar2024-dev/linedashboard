@@ -34,14 +34,16 @@ export interface FQCRecord {
   partNumber: string;
   partName: string;
   customer: string;
-  stage: string; // "Pre-Dispatch Inspection", "Dock Audit", "End-Of-Line FQC"
-  defectCategory: string; // "Visual Defect", "Dimensional Fallout", "Surface Imperfection", "Assembly Fitment"
+  stage: string;
+  defectCategory: string;
   nonConformance: string;
   inspectorId: string;
   shift: ShiftType;
   quantity: number;
-  lotSizeInspected: number;
-  falloutRatePercent: number;
+  /** Absent when the source workbook does not record an inspected lot size. */
+  lotSizeInspected?: number;
+  /** Absent when the inspected lot size is unknown. */
+  falloutRatePercent?: number;
   containmentAction: string;
 }
 
@@ -137,15 +139,4 @@ export interface ShiftComparisonItem {
   fqc: number;
   total: number;
   cost: number;
-}
-
-export interface DataStatusInfo {
-  sourceType: 'SAMPLE_DATA' | 'LOCAL_EXCEL';
-  rejectionStatus: 'CONNECTED' | 'NOT_CONNECTED';
-  reworkStatus: 'CONNECTED' | 'NOT_CONNECTED';
-  fqcStatus: 'CONNECTED' | 'NOT_CONNECTED';
-  mode: 'INTERNAL';
-  lastUpdated: string;
-  availableMonths: string[];
-  totalRecordsCount: number;
 }

@@ -22,6 +22,7 @@ import {
   CHART_AXIS_STROKE,
   CHART_AXIS_LINE,
   CHART_EMPTY_CLASS,
+  CHART_ANIMATION_ACTIVE,
 } from './chartStyles';
 
 interface GroupedBarChartProps {
@@ -75,6 +76,7 @@ function GroupedBarChartImpl({ data, height = 280 }: GroupedBarChartProps) {
             wrapperStyle={CHART_LEGEND_WRAPPER_STYLE}
           />
           <Bar
+            isAnimationActive={CHART_ANIMATION_ACTIVE}
             dataKey="rejection"
             name="Rejection"
             fill={QUALITY_COLORS.rejection.primary}
@@ -82,6 +84,7 @@ function GroupedBarChartImpl({ data, height = 280 }: GroupedBarChartProps) {
             maxBarSize={28}
           />
           <Bar
+            isAnimationActive={CHART_ANIMATION_ACTIVE}
             dataKey="rework"
             name="Rework"
             fill={QUALITY_COLORS.rework.primary}
@@ -89,6 +92,7 @@ function GroupedBarChartImpl({ data, height = 280 }: GroupedBarChartProps) {
             maxBarSize={28}
           />
           <Bar
+            isAnimationActive={CHART_ANIMATION_ACTIVE}
             dataKey="fqc"
             name="FQC Fallout"
             fill={QUALITY_COLORS.fqc.primary}

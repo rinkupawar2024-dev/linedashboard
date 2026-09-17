@@ -1,8 +1,6 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import React from 'react';
-
 /**
  * Chart components are loaded on demand because recharts is a large
  * dependency only needed once data has been imported. Each is exported

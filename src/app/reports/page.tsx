@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { QualityTable } from '@/components/tables/QualityTable';
 import { NoDataState } from '@/components/ui/NoDataState';

@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useDeferredValue, useMemo } from 'react';
 import {
   QualityRecord,
   FQCRecord,
@@ -57,22 +57,7 @@ interface DerivationOptions {
   includeQuality?: boolean;
   /** Skip FQC-record derivation entirely. */
   includeFqc?: boolean;
-  /** Fallback KPI summary when one side is excluded. */
-  fallbackSummary?: KPISummary;
 }
-
-const EMPTY_SUMMARY: KPISummary = {
-  totalRejectionQty: 0,
-  totalRejectionCost: 0,
-  rejectionRate: 'N/A',
-  totalReworkQty: 0,
-  totalReworkCost: 0,
-  reworkRate: 'N/A',
-  totalFqcQty: 0,
-  fqcRate: 'N/A',
-  fqcDefectCount: 0,
-  totalProducedQty: undefined,
-};
 
 /**
  * Computes every derived dataset a dashboard page needs from the raw records
@@ -101,6 +86,17 @@ export function useQualityDerivations(
     [filters, debouncedSearch]
   );
 
+  // The charts are far and away the most expensive thing on these pages, and a
+  // filter change would otherwise rebuild all of their SVG before the browser
+  // can paint the new control state — that is what drives INP.
+  //
+  // Deferring the filter object splits the update in two. On the first pass
+  // every memo below sees its previous inputs, so `filteredQualityRecords` and
+  // friends keep their identity and the memoised charts bail out of rendering
+  // entirely; only the filter bar repaints. The heavy subtree then catches up
+  // at transition priority, which is interruptible and not counted in INP.
+  const deferredFilters = useDeferredValue(effectiveFilters);
+
   // Filter options are derived from the unfiltered dataset so the dropdowns
   // never collapse to a single value as filters narrow the visible rows.
   const filterOptions = useMemo(
@@ -109,13 +105,13 @@ export function useQualityDerivations(
   );
 
   const filteredQualityRecords = useMemo(
-    () => (includeQuality ? filterQualityRecords(qualityRecords, effectiveFilters) : []),
-    [qualityRecords, effectiveFilters, includeQuality]
+    () => (includeQuality ? filterQualityRecords(qualityRecords, deferredFilters) : []),
+    [qualityRecords, deferredFilters, includeQuality]
   );
 
   const filteredFqcRecords = useMemo(
-    () => (includeFqc ? filterFQCRecords(fqcRecords, effectiveFilters) : []),
-    [fqcRecords, effectiveFilters, includeFqc]
+    () => (includeFqc ? filterFQCRecords(fqcRecords, deferredFilters) : []),
+    [fqcRecords, deferredFilters, includeFqc]
   );
 
   const kpiSummary = useMemo(
@@ -191,5 +187,3 @@ export function createDefaultFilters(overrides: Partial<FilterState> = {}): Filt
     ...overrides,
   };
 }
-
-export { EMPTY_SUMMARY };

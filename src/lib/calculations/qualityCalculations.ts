@@ -12,6 +12,7 @@ import {
   ShiftComparisonItem,
   ShiftType,
 } from '@/types/quality';
+import { isExcludedQualityRecord, isExcludedFqcRecord } from '@/lib/utils/qualityFilters';
 
 /**
  * Pure calculation functions for manufacturing quality metrics.
@@ -25,44 +26,33 @@ export function calculateKPISummary(
   fqcRecords: FQCRecord[],
   totalProducedQty?: number
 ): KPISummary {
-  // Single pass to partition records instead of three separate filters.
-  const rejectionRecords: QualityRecord[] = [];
-  const reworkRecords: QualityRecord[] = [];
-  const directFqcRecords: QualityRecord[] = [];
-
-  for (const r of records) {
-    if (r.type === 'REJECTION') rejectionRecords.push(r);
-    else if (r.type === 'REWORK') reworkRecords.push(r);
-    else if (r.type === 'FQC_FALLOUT') directFqcRecords.push(r);
-  }
-
+  // Single pass over the rejection / rework records.
   let totalRejectionQty = 0;
   let totalRejectionCost = 0;
-  for (const r of rejectionRecords) {
-    totalRejectionQty += r.quantity;
-    totalRejectionCost += r.totalCost;
-  }
-
   let totalReworkQty = 0;
   let totalReworkCost = 0;
-  for (const r of reworkRecords) {
-    totalReworkQty += r.quantity;
-    totalReworkCost += r.totalCost;
+
+  for (const r of records) {
+    if (r.type === 'REJECTION') {
+      totalRejectionQty += r.quantity;
+      totalRejectionCost += r.totalCost;
+    } else if (r.type === 'REWORK') {
+      totalReworkQty += r.quantity;
+      totalReworkCost += r.totalCost;
+    }
   }
 
-  // FQC records can be in dedicated FQC dataset or in general records
+  // FQC fallout is carried exclusively by the dedicated FQC dataset. The parser
+  // never emits FQC_FALLOUT entries as quality records, so counting it here
+  // cannot double up with the pass above.
   let totalFqcQty = 0;
   let totalInspected = 0;
-  if (fqcRecords.length > 0) {
-    for (const r of fqcRecords) {
-      totalFqcQty += r.quantity;
-      totalInspected += r.lotSizeInspected;
-    }
-  } else {
-    for (const r of directFqcRecords) totalFqcQty += r.quantity;
+  for (const r of fqcRecords) {
+    totalFqcQty += r.quantity;
+    totalInspected += r.lotSizeInspected ?? 0;
   }
 
-  const fqcDefectCount = fqcRecords.length > 0 ? fqcRecords.length : directFqcRecords.length;
+  const fqcDefectCount = fqcRecords.length;
 
   // Rate calculations: If baseline production is provided, calculate rate; otherwise return 'N/A'
   // to avoid inventing business logic
@@ -74,11 +64,10 @@ export function calculateKPISummary(
     ? (totalReworkQty / totalProducedQty) * 100
     : 'N/A';
 
-  // For FQC: calculate average fallout rate if lot inspected is known
+  // The source workbooks do not record a lot size, so the fallout rate is only
+  // reported when an inspected quantity is actually available.
   const fqcRate: number | 'N/A' =
-    fqcRecords.length > 0 && totalInspected > 0
-      ? (totalFqcQty / totalInspected) * 100
-      : 'N/A';
+    totalInspected > 0 ? (totalFqcQty / totalInspected) * 100 : 'N/A';
 
   return {
     totalRejectionQty,
@@ -250,7 +239,7 @@ export function calculateCustomerComparison(
   const customerMap: { [cust: string]: CustomerComparisonItem } = {};
 
   records.forEach(r => {
-    const cust = r.customer || 'General OEM';
+    const cust = r.customer || 'Unspecified';
     if (!customerMap[cust]) {
       customerMap[cust] = {
         customer: cust,
@@ -277,7 +266,7 @@ export function calculateCustomerComparison(
   });
 
   fqcRecords.forEach(r => {
-    const cust = r.customer || 'General OEM';
+    const cust = r.customer || 'Unspecified';
     if (!customerMap[cust]) {
       customerMap[cust] = {
         customer: cust,
@@ -458,12 +447,7 @@ export function extractFilterOptions(
   const machines = new Set<string>();
 
   records.forEach(r => {
-    if (
-      r.partNumber?.toLowerCase().includes('bush') ||
-      r.partName?.toLowerCase().includes('bush') ||
-      r.customer?.toLowerCase().includes('bush') ||
-      r.nonConformance?.toLowerCase().includes('bush')
-    ) return;
+    if (isExcludedQualityRecord(r)) return;
 
     if (r.month) months.add(r.month);
     if (r.line) cellsAndLines.add(r.line);
@@ -475,12 +459,7 @@ export function extractFilterOptions(
   });
 
   fqcRecords.forEach(r => {
-    if (
-      r.partNumber?.toLowerCase().includes('bush') ||
-      r.partName?.toLowerCase().includes('bush') ||
-      r.customer?.toLowerCase().includes('bush') ||
-      r.nonConformance?.toLowerCase().includes('bush')
-    ) return;
+    if (isExcludedFqcRecord(r)) return;
 
     if (r.month) months.add(r.month);
     if (r.line) cellsAndLines.add(r.line);
@@ -506,17 +485,11 @@ export function filterQualityRecords(
   records: QualityRecord[],
   filter: FilterState
 ): QualityRecord[] {
+  // Normalised once rather than per record.
+  const q = filter.searchQuery ? filter.searchQuery.trim().toLowerCase() : '';
+
   return records.filter(r => {
-    // Exclude any Bush records completely
-    if (
-      r.partNumber?.toLowerCase().includes('bush') ||
-      r.partName?.toLowerCase().includes('bush') ||
-      r.customer?.toLowerCase().includes('bush') ||
-      r.nonConformance?.toLowerCase().includes('bush') ||
-      r.reason?.toLowerCase().includes('bush')
-    ) {
-      return false;
-    }
+    if (isExcludedQualityRecord(r)) return false;
 
     // Month filter
     if (filter.month && filter.month !== 'ALL' && r.month !== filter.month) return false;
@@ -546,8 +519,7 @@ export function filterQualityRecords(
     if (filter.type && filter.type !== 'ALL' && r.type !== filter.type) return false;
 
     // Search query filter
-    if (filter.searchQuery && filter.searchQuery.trim() !== '') {
-      const q = filter.searchQuery.toLowerCase();
+    if (q !== '') {
       const match =
         r.partNumber.toLowerCase().includes(q) ||
         r.partName.toLowerCase().includes(q) ||
@@ -569,16 +541,11 @@ export function filterFQCRecords(
   records: FQCRecord[],
   filter: FilterState
 ): FQCRecord[] {
+  // Normalised once rather than per record.
+  const q = filter.searchQuery ? filter.searchQuery.trim().toLowerCase() : '';
+
   return records.filter(r => {
-    if (
-      r.partNumber?.toLowerCase().includes('bush') ||
-      r.partName?.toLowerCase().includes('bush') ||
-      r.customer?.toLowerCase().includes('bush') ||
-      r.nonConformance?.toLowerCase().includes('bush') ||
-      r.containmentAction?.toLowerCase().includes('bush')
-    ) {
-      return false;
-    }
+    if (isExcludedFqcRecord(r)) return false;
 
     if (filter.month && filter.month !== 'ALL' && r.month !== filter.month) return false;
     if (filter.startDate && r.date < filter.startDate) return false;
@@ -592,8 +559,7 @@ export function filterFQCRecords(
     if (filter.customer && filter.customer !== 'ALL' && r.customer !== filter.customer) return false;
     if (filter.partNumber && filter.partNumber !== 'ALL' && r.partNumber !== filter.partNumber) return false;
 
-    if (filter.searchQuery && filter.searchQuery.trim() !== '') {
-      const q = filter.searchQuery.toLowerCase();
+    if (q !== '') {
       const match =
         r.partNumber.toLowerCase().includes(q) ||
         r.partName.toLowerCase().includes(q) ||

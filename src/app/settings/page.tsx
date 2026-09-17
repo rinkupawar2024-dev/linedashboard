@@ -1,6 +1,5 @@
 'use client';
 
-import React from 'react';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { Card } from '@/components/ui/Card';
 import { useQualityData } from '@/context/QualityDataContext';
@@ -10,7 +9,6 @@ import {
   ShieldCheck,
   FolderTree,
   Lock,
-  Server,
   CheckCircle2,
   HardDrive,
   UploadCloud,
@@ -32,7 +30,7 @@ export default function SettingsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Internal Portal Configuration & Data Settings"
-        subtitle="System status, data source adapter configuration, and local server integration readiness."
+        subtitle="System status, details of the imported workbook, and how quality data is handled."
         badgeText={hasData ? 'Excel Integrated' : 'No Data Loaded'}
         badgeColor={hasData ? 'emerald' : 'orange'}
         actions={
@@ -156,14 +154,14 @@ export default function SettingsPage() {
 
       {/* Target Directory Structure */}
       <Card
-        title="Local Data Source Architecture"
-        subtitle="Server-side directory structure designed for automated or manual Excel integration"
+        title="Data Handling"
+        subtitle="How workbooks reach the portal, and the folder convention the plant uses to archive them"
       >
         <div className="space-y-4 text-xs text-[#A6A6A6]">
           <div className="p-4 bg-[#0C0C0C] rounded-lg border border-[#242424]">
             <div className="flex items-center gap-2 text-[#FFFFFF] font-bold mb-2">
               <FolderTree className="w-4 h-4 text-[#FF7900]" />
-              <span>Target Directory Structure</span>
+              <span>Suggested Archive Layout</span>
             </div>
             <pre className="p-3 bg-[#080808] text-[#FFFFFF] rounded font-mono text-[11px] overflow-x-auto leading-relaxed border border-[#242424]">
 {`LINE QUALITY DATA/
@@ -197,11 +195,13 @@ export default function SettingsPage() {
 
             <div className="p-3.5 bg-[#0C0C0C] rounded-lg border border-[#242424]">
               <h4 className="font-bold text-[#FFFFFF] flex items-center gap-1.5 mb-1.5">
-                <Server className="w-4 h-4 text-[#FF7900]" />
-                <span>Server-Side Handlers</span>
+                <ShieldCheck className="w-4 h-4 text-[#FF7900]" />
+                <span>Browser-Only Processing</span>
               </h4>
               <p className="text-[#A6A6A6] leading-relaxed text-[11px]">
-                Route Handlers in <code className="font-bold text-[#FFFFFF]">/api/*</code> are fully configured to serve normalized JSON records to the dashboard and reporting modules.
+                There is no server-side data store or API. Workbooks are parsed and analysed entirely in the
+                browser, and the imported dataset is discarded when the page is reloaded — re-import the
+                workbook to continue.
               </p>
             </div>
           </div>

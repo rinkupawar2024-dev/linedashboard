@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { DashboardFilters } from '@/components/filters/DashboardFilters';
 import { KPICard } from '@/components/ui/KPICard';
@@ -57,6 +57,10 @@ export default function FQCFalloutPage() {
   const startIndex = (currentPage - 1) * pageSize;
   const paginatedFqcRecords = filteredFqcRecords.slice(startIndex, startIndex + pageSize);
 
+  // The source workbooks record no lot size, so sampled volume stays unknown
+  // rather than being extrapolated from the fallout quantity.
+  const totalSampledUnits = filteredFqcRecords.reduce((s, r) => s + (r.lotSizeInspected ?? 0), 0);
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -107,7 +111,9 @@ export default function FQCFalloutPage() {
                 },
                 {
                   label: 'Sampled Units',
-                  value: `${formatNumber(filteredFqcRecords.reduce((s, r) => s + (r.lotSizeInspected || r.quantity * 5), 0))} inspected`,
+                  value: totalSampledUnits > 0
+                    ? `${formatNumber(totalSampledUnits)} inspected`
+                    : 'Not recorded',
                 }
               ]}
             />
@@ -261,7 +267,7 @@ export default function FQCFalloutPage() {
                             {f.quantity} pcs
                           </td>
                           <td className="py-2.5 px-3 text-right font-semibold text-[#A6A6A6]">
-                            {f.lotSizeInspected}
+                            {f.lotSizeInspected ?? 'N/A'}
                           </td>
                           <td className="py-2.5 px-3 text-right font-bold text-[#FFFFFF]">
                             {formatPercent(f.falloutRatePercent)}

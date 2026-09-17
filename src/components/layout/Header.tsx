@@ -1,17 +1,11 @@
 'use client';
 
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { RefreshCw, User, Calendar, ShieldCheck, UploadCloud, FileSpreadsheet } from 'lucide-react';
 import { COMPANY_NAME, PORTAL_NAME } from '@/lib/constants/qualityConstants';
 import { useQualityData } from '@/context/QualityDataContext';
 
-interface HeaderProps {
-  onRefresh?: () => void;
-}
-
-export function Header({
-  onRefresh,
-}: HeaderProps) {
+export function Header() {
   const {
     activeMonth,
     hasData,
@@ -23,9 +17,6 @@ export function Header({
 
   const handleRefreshClick = () => {
     setIsSpinning(true);
-    if (onRefresh) {
-      onRefresh();
-    }
     setTimeout(() => {
       setIsSpinning(false);
     }, 600);

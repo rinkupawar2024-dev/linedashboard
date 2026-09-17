@@ -1,4 +1,3 @@
-import React from 'react';
 import { QualityType } from '@/types/quality';
 
 interface StatusBadgeProps {

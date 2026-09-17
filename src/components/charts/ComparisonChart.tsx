@@ -22,6 +22,7 @@ import {
   CHART_AXIS_STROKE,
   CHART_AXIS_LINE,
   CHART_EMPTY_CLASS,
+  CHART_ANIMATION_ACTIVE,
 } from './chartStyles';
 
 const CUSTOMER_MARGIN = { top: 10, right: 15, left: -15, bottom: 25 };
@@ -37,6 +38,7 @@ function QualityBars({ maxBarSize }: { maxBarSize: number }) {
         fill={QUALITY_COLORS.rejection.primary}
         radius={[4, 4, 0, 0]}
         maxBarSize={maxBarSize}
+        isAnimationActive={CHART_ANIMATION_ACTIVE}
       />
       <Bar
         dataKey="rework"
@@ -44,6 +46,7 @@ function QualityBars({ maxBarSize }: { maxBarSize: number }) {
         fill={QUALITY_COLORS.rework.primary}
         radius={[4, 4, 0, 0]}
         maxBarSize={maxBarSize}
+        isAnimationActive={CHART_ANIMATION_ACTIVE}
       />
       <Bar
         dataKey="fqc"
@@ -51,6 +54,7 @@ function QualityBars({ maxBarSize }: { maxBarSize: number }) {
         fill={QUALITY_COLORS.fqc.primary}
         radius={[4, 4, 0, 0]}
         maxBarSize={maxBarSize}
+        isAnimationActive={CHART_ANIMATION_ACTIVE}
       />
     </>
   );

@@ -1,19 +1,11 @@
 import type * as XLSXType from 'xlsx';
 import { QualityRecord, FQCRecord, QualityType } from '@/types/quality';
+import { containsExcludedTerm, isExcludedLabel } from '@/lib/utils/qualityFilters';
 
-type XLSXModule = typeof XLSXType;
+export type XLSXModule = typeof XLSXType;
 
 /** A raw cell value as read from a worksheet. */
 export type ExcelCell = string | number | boolean | Date | null | undefined;
-
-// xlsx is loaded on demand so it stays out of the initial client bundle.
-let xlsxPromise: Promise<XLSXModule> | null = null;
-function loadXLSX(): Promise<XLSXModule> {
-  if (!xlsxPromise) {
-    xlsxPromise = import('xlsx');
-  }
-  return xlsxPromise;
-}
 
 export interface ExcelImportResult {
   fileName: string;
@@ -29,6 +21,8 @@ export interface ExcelImportResult {
     reworkCost: number;
     fqcCount: number;
     fqcQty: number;
+    /** Data rows dropped because they carried no usable date or quantity. */
+    skippedRows: number;
     months: string[];
     sheetsParsed: string[];
   };
@@ -45,57 +39,144 @@ export const MAX_SHEETS_PER_WORKBOOK = 50;
 
 export class ExcelImportError extends Error {}
 
-export function parseExcelDate(val: ExcelCell, XLSX: XLSXModule): string {
-  if (!val) return new Date().toISOString().split('T')[0];
-  
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** Day-first numeric parts ("01", "09", "26") to YYYY-MM-DD, or null if invalid. */
+function buildIsoDate(parts: string[]): string | null {
+  const day = Number(parts[0]);
+  const month = Number(parts[1]);
+  const rawYear = parts[2].trim();
+  const year = Number(rawYear);
+  if (!Number.isInteger(day) || !Number.isInteger(month) || !Number.isInteger(year)) return null;
+  if (day < 1 || day > 31 || month < 1 || month > 12) return null;
+  const fullYear = rawYear.length === 2 ? 2000 + year : year;
+  return `${fullYear}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/**
+ * Normalizes the date formats found in the plant workbooks — "01.09.26",
+ * "01/09/2026", ISO, and Excel serial numbers — to YYYY-MM-DD.
+ *
+ * Returns null when the value is not a recognisable date so the caller can
+ * report the row, rather than silently stamping it with today's date.
+ */
+export function parseExcelDate(val: ExcelCell, XLSX: XLSXModule): string | null {
+  if (val === null || val === undefined) return null;
+
   if (typeof val === 'string') {
     const trimmed = val.trim();
-    // Match "01.09.26" or "01.09.2026"
+    if (trimmed === '') return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
     const dotParts = trimmed.split('.');
-    if (dotParts.length === 3) {
-      const day = dotParts[0].padStart(2, '0');
-      const month = dotParts[1].padStart(2, '0');
-      let year = dotParts[2];
-      if (year.length === 2) year = '20' + year;
-      return `${year}-${month}-${day}`;
-    }
-    // Match "01/09/2026" or "01/09/26"
+    if (dotParts.length === 3) return buildIsoDate(dotParts);
     const slashParts = trimmed.split('/');
-    if (slashParts.length === 3) {
-      const day = slashParts[0].padStart(2, '0');
-      const month = slashParts[1].padStart(2, '0');
-      let year = slashParts[2];
-      if (year.length === 2) year = '20' + year;
-      return `${year}-${month}-${day}`;
-    }
-    // Match ISO "2026-09-01"
-    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-      return trimmed;
-    }
-  } else if (typeof val === 'number') {
+    if (slashParts.length === 3) return buildIsoDate(slashParts);
+    return null;
+  }
+
+  if (typeof val === 'number') {
     try {
       const date = XLSX.SSF.parse_date_code(val);
       if (date) {
-        const day = String(date.d).padStart(2, '0');
-        const month = String(date.m).padStart(2, '0');
-        const year = date.y;
-        return `${year}-${month}-${day}`;
+        return `${date.y}-${String(date.m).padStart(2, '0')}-${String(date.d).padStart(2, '0')}`;
       }
     } catch {
-      // ignore
+      // Not a valid serial date.
     }
+    return null;
   }
-  return new Date().toISOString().split('T')[0];
+
+  if (val instanceof Date && !isNaN(val.getTime())) {
+    return val.toISOString().split('T')[0];
+  }
+
+  return null;
 }
 
+/** "2026-09-01" to "Sep-2026"; empty string when the date is not ISO. */
 export function deriveMonthString(dateStr: string): string {
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const parts = dateStr.split('-');
-  if (parts.length === 3) {
-    const mIdx = parseInt(parts[1], 10) - 1;
-    return `${monthNames[mIdx] || 'Sep'}-${parts[0]}`;
+  if (parts.length !== 3) return '';
+  const monthName = MONTH_NAMES[Number(parts[1]) - 1];
+  return monthName ? `${monthName}-${parts[0]}` : '';
+}
+
+/**
+ * Resolves a column index for the first header matching one of `aliases`.
+ *
+ * Matching is tiered — exact, then prefix, then substring — so a specific field
+ * always beats a looser one. Notably, "total cost" must not be claimed by the
+ * "cost per piece" column merely because both contain "cost". `used` stops two
+ * fields from resolving to the same column.
+ */
+function matchColumn(headers: string[], aliases: string[], used: Set<number>): number {
+  const free = (i: number) => headers[i] !== '' && !used.has(i);
+  for (const alias of aliases) {
+    const i = headers.findIndex((h, idx) => free(idx) && h === alias);
+    if (i !== -1) return i;
   }
-  return 'Sep-2026';
+  for (const alias of aliases) {
+    const i = headers.findIndex((h, idx) => free(idx) && h.startsWith(alias));
+    if (i !== -1) return i;
+  }
+  for (const alias of aliases) {
+    const i = headers.findIndex((h, idx) => free(idx) && h.includes(alias));
+    if (i !== -1) return i;
+  }
+  return -1;
+}
+
+/**
+ * Sheet names carry the line identity ("Truning Daily Rej-Sep-26"), so strip
+ * the month suffix and the daily/rejection/rework noise to get a stable label
+ * shared by the rejection and rework sheets of the same line.
+ */
+function deriveLineFromSheetName(sheetName: string): string {
+  const cleaned = sheetName
+    .replace(/[-_\s]*[A-Za-z]{3,9}[-_\s]*\d{2,4}\s*$/, '')
+    .replace(/\b(daily|rej|rejection|rew|rework|sheet\s*\d*)\b/gi, ' ')
+    .replace(/[._]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || 'Unassigned Line';
+}
+
+/** Operation codes that carry no process meaning and must not become labels. */
+const OPERATION_PLACEHOLDER = /^(0|n\/?a|nil|-+)$/i;
+
+/**
+ * The "Oprn." column is free text: it mixes case variants ("turning" and
+ * "Turning") and placeholder codes ("0"). Normalise the label so the same
+ * operation is not split across several filter values, and return '' for codes
+ * that should fall back to the line label.
+ */
+function normalizeOperation(value: string): string {
+  const trimmed = value.replace(/\s+/g, ' ').trim();
+  if (trimmed === '' || OPERATION_PLACEHOLDER.test(trimmed)) return '';
+  if (containsExcludedTerm([trimmed])) return '';
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+}
+
+/** Cell label derived from the operation column, e.g. "VMC" to "VMC Cell". */
+function deriveCell(operation: string, line: string): string {
+  return operation ? `${operation} Cell` : line;
+}
+
+/** Reads a trimmed string cell, or '' when the column is absent or empty. */
+function readText(row: ExcelCell[], idx: number): string {
+  return idx >= 0 && row[idx] != null ? String(row[idx]).trim() : '';
+}
+
+/** Reads a positive numeric cell, or 0 when absent, empty, or invalid. */
+function readQty(row: ExcelCell[], idx: number): number {
+  const value = idx >= 0 ? Number(row[idx]) : 0;
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+interface SheetParseResult {
+  records: QualityRecord[];
+  fqcRecords: FQCRecord[];
+  skippedRows: number;
 }
 
 function parseSingleSheet(
@@ -103,9 +184,9 @@ function parseSingleSheet(
   sheetName: string,
   defaultType: QualityType,
   XLSX: XLSXModule
-): { records: QualityRecord[]; fqcRecords: FQCRecord[] } {
+): SheetParseResult {
   const rows = XLSX.utils.sheet_to_json<ExcelCell[]>(sheet, { header: 1 });
-  if (!rows || rows.length < 4) return { records: [], fqcRecords: [] };
+  if (!rows || rows.length < 4) return { records: [], fqcRecords: [], skippedRows: 0 };
 
   // Bound the work done per sheet so a crafted workbook cannot exhaust the tab.
   if (rows.length > MAX_ROWS_PER_SHEET) {
@@ -114,7 +195,7 @@ function parseSingleSheet(
     );
   }
 
-  // Find header row: look for 'part no' or 'm/c' or 'non conformance' or 'sr no'
+  // Find the header row within the first 12 rows.
   let headerRowIdx = -1;
   for (let i = 0; i < Math.min(12, rows.length); i++) {
     const row = rows[i] || [];
@@ -128,143 +209,151 @@ function parseSingleSheet(
     }
   }
 
-  if (headerRowIdx === -1) return { records: [], fqcRecords: [] };
+  if (headerRowIdx === -1) return { records: [], fqcRecords: [], skippedRows: 0 };
 
   const rawHeaderRow = rows[headerRowIdx] || [];
   const headers = rawHeaderRow.map(h => (h != null ? String(h).trim().toLowerCase() : ''));
 
-  const getCol = (names: string[]) => {
-    return headers.findIndex(h => h && names.some(n => h.includes(n)));
+  const used = new Set<number>();
+  const col = (aliases: string[]) => {
+    const idx = matchColumn(headers, aliases, used);
+    if (idx !== -1) used.add(idx);
+    return idx;
   };
 
-  const idxMcNo = getCol(['m/c no', 'machine no', 'mc no', 'machine number']);
-  const idxMcName = getCol(['m/c name', 'machine name', 'machine']);
-  const idxOprn = getCol(['oprn', 'operation', 'opn']);
-  const idxPartNo = getCol(['part no.', 'part no', 'part number', 'part']);
-  const idxCustomer = getCol(['customer', 'cust']);
-  const idxOperator = getCol(['operator', 'optr']);
-  const idxDefect = getCol(['non conformance', 'defect', 'problem', 'nature of problem', 'rejection reason']);
-  const idxDate = getCol(['date']);
-  const idx1st = getCol(['1st', 'shift a']);
-  const idx2nd = getCol(['2nd', 'shift b']);
-  const idx3rd = getCol(['3rd', 'shift c']);
-  const idxFqc = getCol(['fqc']);
-  const idxTotalQty = getCol(['total rej. qty', 'total qty', 'total rej', 'rejection qty', 'rework qty']);
-  const idxCostPiece = getCol(['cost per piece', 'cost/pc', 'rate', 'piece cost']);
-  const idxTotalCost = getCol(['total cost', 'cost of poor quality', 'cost']);
-  const idxReason = getCol(['reason', 'root cause', 'cause']);
-  const idxAction = getCol(['rejection identified at', 'action', 'corrective action']);
+  const idxMcNo = col(['m/c no', 'machine no', 'mc no', 'machine number']);
+  const idxMcName = col(['m/c name', 'machine name', 'machine']);
+  const idxOprn = col(['oprn', 'operation', 'opn']);
+  const idxPartNo = col(['part no.', 'part no', 'part number', 'part']);
+  const idxCustomer = col(['customer', 'cust']);
+  const idxOperator = col(['operator', 'optr']);
+  const idxDefect = col(['non conformance', 'defect', 'problem', 'nature of problem', 'rejection reason']);
+  const idxDate = col(['date']);
+  const idx1st = col(['1st', 'shift a']);
+  const idx2nd = col(['2nd', 'shift b']);
+  const idx3rd = col(['3rd', 'shift c']);
+  const idxFqc = col(['fqc']);
+  const idxTotalQty = col(['total rej. qty', 'total qty', 'total rej', 'rejection qty', 'rework qty']);
+  const idxCostPiece = col(['cost per piece', 'cost/pc', 'rate', 'piece cost']);
+  const idxTotalCost = col(['total cost', 'cost of poor quality', 'cost']);
+  const idxReason = col(['reason', 'root cause', 'cause']);
+  const idxAction = col(['rejection identified at', 'action', 'corrective action']);
+
+  const line = deriveLineFromSheetName(sheetName);
+  const sheetKey = sheetName.replace(/\s+/g, '_');
+  const isFqcSheet = defaultType === 'FQC_FALLOUT';
 
   const records: QualityRecord[] = [];
   const fqcRecords: FQCRecord[] = [];
+  let skippedRows = 0;
 
   for (let r = headerRowIdx + 1; r < rows.length; r++) {
     const row = rows[r];
     if (!row || row.length === 0) continue;
 
-    const mcNo = idxMcNo >= 0 && row[idxMcNo] != null ? String(row[idxMcNo]).trim() : '';
-    const partNo = idxPartNo >= 0 && row[idxPartNo] != null ? String(row[idxPartNo]).trim() : '';
-    const defect = idxDefect >= 0 && row[idxDefect] != null ? String(row[idxDefect]).trim() : '';
-    const rawDate = idxDate >= 0 ? row[idxDate] : '';
-    const dateStr = parseExcelDate(rawDate, XLSX);
-    const monthStr = deriveMonthString(dateStr);
-
-    const customer = idxCustomer >= 0 && row[idxCustomer] ? String(row[idxCustomer]).trim() : 'RE (Royal Enfield)';
-    const reason = idxReason >= 0 && row[idxReason] ? String(row[idxReason]).trim() : '';
-
-    // STRICT RULE: Exclude ALL Bush data completely
-    const isBush =
-      partNo.toLowerCase().includes('bush') ||
-      customer.toLowerCase().includes('bush') ||
-      defect.toLowerCase().includes('bush') ||
-      reason.toLowerCase().includes('bush');
-
-    if (isBush) {
-      continue; // Skip all Bush records completely
-    }
-
-    // Skip empty or summary lines
-    if (!partNo && !defect && !mcNo) continue;
-    const firstCell = String(row[0] || '').toLowerCase();
-    const secondCell = String(row[1] || '').toLowerCase();
+    // Drop blank spacer rows and the workbook's own total / summary lines.
+    const firstCell = String(row[0] ?? '').toLowerCase();
+    const secondCell = String(row[1] ?? '').toLowerCase();
     if (firstCell.includes('total') || secondCell.includes('total') || firstCell.includes('grand')) continue;
 
-    const qty1st = idx1st >= 0 && Number(row[idx1st]) > 0 ? Number(row[idx1st]) : 0;
-    const qty2nd = idx2nd >= 0 && Number(row[idx2nd]) > 0 ? Number(row[idx2nd]) : 0;
-    const qty3rd = idx3rd >= 0 && Number(row[idx3rd]) > 0 ? Number(row[idx3rd]) : 0;
-    const qtyFqc = idxFqc >= 0 && Number(row[idxFqc]) > 0 ? Number(row[idxFqc]) : 0;
+    const mcNo = readText(row, idxMcNo);
+    const partNo = readText(row, idxPartNo);
+    const defect = readText(row, idxDefect);
+    if (!partNo && !defect && !mcNo) continue;
 
-    let totalQty = idxTotalQty >= 0 && Number(row[idxTotalQty]) > 0
-      ? Number(row[idxTotalQty])
-      : (qty1st + qty2nd + qty3rd + qtyFqc);
+    const customer = readText(row, idxCustomer);
+    const reason = readText(row, idxReason);
+    if (containsExcludedTerm([partNo, customer, defect, reason])) continue;
 
-    if (totalQty === 0) totalQty = 1;
+    const dateStr = parseExcelDate(idxDate >= 0 ? row[idxDate] : null, XLSX);
+    if (dateStr === null) {
+      skippedRows++;
+      continue;
+    }
 
-    const costPerPiece = idxCostPiece >= 0 && Number(row[idxCostPiece]) > 0 ? Number(row[idxCostPiece]) : 0;
-    const totalCost = idxTotalCost >= 0 && Number(row[idxTotalCost]) > 0
-      ? Number(row[idxTotalCost])
-      : costPerPiece * totalQty;
+    const qty1st = readQty(row, idx1st);
+    const qty2nd = readQty(row, idx2nd);
+    const qty3rd = readQty(row, idx3rd);
+    const qtyFqc = readQty(row, idxFqc);
+    const shiftSum = qty1st + qty2nd + qty3rd;
 
-    const mcName = idxMcName >= 0 && row[idxMcName] ? String(row[idxMcName]).trim() : (mcNo || 'Machine');
-    const operator = idxOperator >= 0 && row[idxOperator] ? String(row[idxOperator]).trim() : 'Line Operator';
-    const action = idxAction >= 0 && row[idxAction] ? String(row[idxAction]).trim() : 'Logged from Excel Import';
-    const operation = idxOprn >= 0 && row[idxOprn] ? String(row[idxOprn]).trim() : 'Turning';
+    // The sheet's own "Total Rej. qty" column is authoritative when present.
+    // Falling back to the shift columns must not fold FQC volume into the
+    // rejection/rework quantity, or the same pieces get counted twice.
+    const reportedTotal = idxTotalQty >= 0 ? Number(row[idxTotalQty]) : 0;
+    const totalQty = reportedTotal > 0 ? reportedTotal : isFqcSheet ? shiftSum + qtyFqc : shiftSum;
 
-    // Shift determination
+    const recordQty = isFqcSheet ? 0 : totalQty;
+    const fqcQtyForRow = isFqcSheet ? totalQty : qtyFqc;
+    if (recordQty <= 0 && fqcQtyForRow <= 0) {
+      skippedRows++;
+      continue;
+    }
+
+    const operation = normalizeOperation(readText(row, idxOprn));
+    const cell = deriveCell(operation, line);
+    const monthStr = deriveMonthString(dateStr);
+    const partName = partNo ? `Part #${partNo}` : '';
+
+    // The workbook records volume per shift rather than a shift label, so the
+    // shift is taken to be the one carrying the most defects.
     let shift: 'Shift A' | 'Shift B' | 'Shift C' = 'Shift A';
     if (qty2nd > 0 && qty2nd >= qty1st && qty2nd >= qty3rd) shift = 'Shift B';
     else if (qty3rd > 0 && qty3rd >= qty1st && qty3rd >= qty2nd) shift = 'Shift C';
 
-    const recordType: QualityType = defaultType;
+    if (recordQty > 0) {
+      const costPerPiece = readQty(row, idxCostPiece);
+      const reportedCost = idxTotalCost >= 0 ? Number(row[idxTotalCost]) : 0;
+      const totalCost = reportedCost > 0 ? reportedCost : costPerPiece * recordQty;
 
-    records.push({
-      id: `EXCEL-${recordType}-${sheetName.replace(/\s+/g, '_')}-${r}`,
-      date: dateStr,
-      month: monthStr,
-      type: recordType,
-      cell: 'Turning Cell / Line',
-      line: 'Line - Hard Turning',
-      machine: mcName,
-      machineNumber: mcNo || 'M-GEN',
-      operation: operation,
-      partNumber: partNo ? `PART-${partNo}` : 'PART-UNKNOWN',
-      partName: `Part #${partNo || 'Std'}`,
-      customer: customer,
-      operator: operator,
-      nonConformance: defect || 'Quality Issue',
-      shift: shift,
-      quantity: totalQty,
-      costPerPiece: costPerPiece,
-      totalCost: totalCost,
-      reason: reason,
-      correctiveAction: action,
-    });
-
-    // If FQC column contains quantity, create FQC record
-    if (qtyFqc > 0) {
-      fqcRecords.push({
-        id: `EXCEL-FQC-${sheetName.replace(/\s+/g, '_')}-${r}`,
+      records.push({
+        id: `EXCEL-${defaultType}-${sheetKey}-${r}`,
         date: dateStr,
         month: monthStr,
-        cell: 'Turning Cell / Line',
-        line: 'Line - Hard Turning',
-        partNumber: partNo ? `PART-${partNo}` : 'PART-UNKNOWN',
-        partName: `Part #${partNo || 'Std'}`,
-        customer: customer,
-        stage: 'End-Of-Line FQC',
-        defectCategory: 'Dimensional / Visual Fallout',
-        nonConformance: defect || 'FQC Fallout',
-        inspectorId: 'FQC-INSP',
-        shift: shift,
-        quantity: qtyFqc,
-        lotSizeInspected: totalQty * 10,
-        falloutRatePercent: Number(((qtyFqc / (totalQty * 10)) * 100).toFixed(2)),
-        containmentAction: 'Quarantined & inspected from Excel import',
+        type: defaultType,
+        cell,
+        line,
+        machine: readText(row, idxMcName) || mcNo || 'Unassigned',
+        machineNumber: mcNo,
+        operation,
+        partNumber: partNo,
+        partName,
+        customer,
+        operator: readText(row, idxOperator),
+        nonConformance: defect,
+        shift,
+        quantity: recordQty,
+        costPerPiece,
+        totalCost,
+        reason,
+        correctiveAction: readText(row, idxAction),
+      });
+    }
+
+    if (fqcQtyForRow > 0) {
+      // The workbooks record no lot size, so the fallout rate is left undefined
+      // rather than derived from an invented sample size.
+      fqcRecords.push({
+        id: `EXCEL-FQC-${sheetKey}-${r}`,
+        date: dateStr,
+        month: monthStr,
+        cell,
+        line,
+        partNumber: partNo,
+        partName,
+        customer,
+        stage: 'FQC Audit',
+        defectCategory: '',
+        nonConformance: defect,
+        inspectorId: '',
+        shift,
+        quantity: fqcQtyForRow,
+        containmentAction: '',
       });
     }
   }
 
-  return { records, fqcRecords };
+  return { records, fqcRecords, skippedRows };
 }
 
 export function parseExcelWorkbook(
@@ -275,6 +364,7 @@ export function parseExcelWorkbook(
   const allQualityRecords: QualityRecord[] = [];
   const allFqcRecords: FQCRecord[] = [];
   const parsedSheetNames: string[] = [];
+  let skippedRows = 0;
 
   if (workbook.SheetNames.length > MAX_SHEETS_PER_WORKBOOK) {
     throw new ExcelImportError(
@@ -283,17 +373,14 @@ export function parseExcelWorkbook(
   }
 
   workbook.SheetNames.forEach(sheetName => {
-    const lowerName = sheetName.toLowerCase();
-    
-    // STRICT RULE: Skip all Bush sheets completely (e.g. "Bush Rejection")
-    if (lowerName.includes('bush')) {
-      return;
-    }
+    // Sheets that are entirely out of scope are skipped wholesale.
+    if (isExcludedLabel(sheetName)) return;
 
     const sheet = workbook.Sheets[sheetName];
     if (!sheet) return;
 
     // Detect sheet type
+    const lowerName = sheetName.toLowerCase();
     let sheetType: QualityType = 'REJECTION';
     if (lowerName.includes('rew') || lowerName.includes('rework')) {
       sheetType = 'REWORK';
@@ -303,11 +390,13 @@ export function parseExcelWorkbook(
       sheetType = 'REJECTION';
     }
 
-    const { records, fqcRecords } = parseSingleSheet(sheet, sheetName, sheetType, XLSX);
-    if (records.length > 0 || fqcRecords.length > 0) {
-      allQualityRecords.push(...records);
-      allFqcRecords.push(...fqcRecords);
-      parsedSheetNames.push(`${sheetName} (${records.length} records)`);
+    const parsed = parseSingleSheet(sheet, sheetName, sheetType, XLSX);
+    skippedRows += parsed.skippedRows;
+
+    if (parsed.records.length > 0 || parsed.fqcRecords.length > 0) {
+      allQualityRecords.push(...parsed.records);
+      allFqcRecords.push(...parsed.fqcRecords);
+      parsedSheetNames.push(`${sheetName} (${parsed.records.length + parsed.fqcRecords.length} records)`);
     }
   });
 
@@ -323,8 +412,12 @@ export function parseExcelWorkbook(
   const fqcQty = allFqcRecords.reduce((s, r) => s + r.quantity, 0);
 
   const monthsSet = new Set<string>();
-  allQualityRecords.forEach(r => monthsSet.add(r.month));
-  allFqcRecords.forEach(r => monthsSet.add(r.month));
+  allQualityRecords.forEach(r => {
+    if (r.month) monthsSet.add(r.month);
+  });
+  allFqcRecords.forEach(r => {
+    if (r.month) monthsSet.add(r.month);
+  });
 
   return {
     fileName,
@@ -340,21 +433,10 @@ export function parseExcelWorkbook(
       reworkCost,
       fqcCount: allFqcRecords.length,
       fqcQty,
+      skippedRows,
       months: Array.from(monthsSet),
       sheetsParsed: parsedSheetNames,
     },
   };
 }
 
-export async function parseUploadedExcelFile(file: File): Promise<ExcelImportResult> {
-  if (file.size > MAX_UPLOAD_BYTES) {
-    throw new ExcelImportError(
-      `File is ${(file.size / (1024 * 1024)).toFixed(1)} MB, which exceeds the ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB limit.`
-    );
-  }
-
-  const arrayBuffer = await file.arrayBuffer();
-  const XLSX = await loadXLSX();
-  const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-  return parseExcelWorkbook(workbook, file.name, XLSX);
-}

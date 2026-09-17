@@ -22,6 +22,7 @@ import {
   CHART_AXIS_STROKE,
   CHART_AXIS_LINE,
   CHART_EMPTY_CLASS,
+  CHART_ANIMATION_ACTIVE,
 } from './chartStyles';
 
 interface QualityTrendChartProps {
@@ -83,6 +84,7 @@ function QualityTrendChartImpl({
           {showRejection && (
             <Line
               type="monotone"
+              isAnimationActive={CHART_ANIMATION_ACTIVE}
               dataKey="rejectionQty"
               name="Rejection"
               stroke={QUALITY_COLORS.rejection.primary}
@@ -94,6 +96,7 @@ function QualityTrendChartImpl({
           {showRework && (
             <Line
               type="monotone"
+              isAnimationActive={CHART_ANIMATION_ACTIVE}
               dataKey="reworkQty"
               name="Rework"
               stroke={QUALITY_COLORS.rework.primary}
@@ -105,6 +108,7 @@ function QualityTrendChartImpl({
           {showFqc && (
             <Line
               type="monotone"
+              isAnimationActive={CHART_ANIMATION_ACTIVE}
               dataKey="fqcQty"
               name="FQC Fallout"
               stroke={QUALITY_COLORS.fqc.primary}

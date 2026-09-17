@@ -1,6 +1,5 @@
 'use client';
 
-import React from 'react';
 import { KPISummary } from '@/types/quality';
 import { KPICard } from '@/components/ui/KPICard';
 import { formatCurrency, formatNumber } from '@/lib/utils/formatters';

@@ -31,7 +31,7 @@ export function QualityDataProvider({ children }: { children: React.ReactNode })
 
   const importExcelFile = async (file: File): Promise<ExcelImportResult> => {
     // Loaded on demand so the parser (and xlsx) stay out of the initial bundle.
-    const { parseUploadedExcelFile } = await import('@/lib/services/excelParser');
+    const { parseUploadedExcelFile } = await import('@/lib/services/excelImport');
     const result = await parseUploadedExcelFile(file);
 
     if (result.qualityRecords.length === 0 && result.fqcRecords.length === 0) {

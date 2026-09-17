@@ -20,6 +20,7 @@ import {
   CHART_AXIS_STROKE,
   CHART_AXIS_LINE,
   CHART_EMPTY_CLASS,
+  CHART_ANIMATION_ACTIVE,
 } from './chartStyles';
 
 interface ParetoChartProps {
@@ -95,6 +96,7 @@ function ParetoChartImpl({ data, height = 280 }: ParetoChartProps) {
             wrapperStyle={CHART_LEGEND_WRAPPER_STYLE}
           />
           <Bar
+            isAnimationActive={CHART_ANIMATION_ACTIVE}
             yAxisId="left"
             dataKey="quantity"
             name="Defect Qty"
@@ -103,6 +105,7 @@ function ParetoChartImpl({ data, height = 280 }: ParetoChartProps) {
             maxBarSize={32}
           />
           <Line
+            isAnimationActive={CHART_ANIMATION_ACTIVE}
             yAxisId="right"
             type="monotone"
             dataKey="cumulativePercentage"

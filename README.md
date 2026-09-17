@@ -38,7 +38,9 @@ you upload in the browser. Nothing is sent anywhere; parsing and analysis both h
 | Compiler | React Compiler enabled |
 
 React Compiler is on (`reactCompiler: true` in `next.config.ts`), so avoid manual memoization
-unless profiling shows a specific need.
+unless profiling shows a specific need. It runs through the native Rust port
+(`experimental.turbopackRustReactCompiler`), which is why `babel-plugin-react-compiler` is not
+a dependency.
 
 ## Getting Started
 
@@ -55,9 +57,49 @@ Open [http://localhost:3000](http://localhost:3000). The portal loads with no da
 | Command | Purpose |
 | --- | --- |
 | `npm run dev` | Start the dev server |
-| `npm run build` | Production build |
-| `npm start` | Serve the production build |
+| `npm run build` | Production build — writes the static site to `out/` |
 | `npm run lint` | Run ESLint |
+
+`npm start` is intentionally absent: `next start` needs a Node server, and this project
+builds to static files instead. Use `npm run dev` locally, or serve `out/` with any static
+file server.
+
+## Deployment
+
+The app builds to a **static site** (`output: 'export'`), so it runs anywhere that can serve
+files — no Node server, no serverless functions, no per-user compute.
+
+### Cloudflare Pages
+
+1. Connect the Git repo and create a Pages project.
+2. Set the build configuration:
+
+   | Setting | Value |
+   | --- | --- |
+   | Framework preset | Next.js (Static HTML Export) |
+   | Build command | `npm run build` |
+   | Build output directory | `out` |
+   | Node version | `22` (env var `NODE_VERSION`) |
+
+3. Deploy.
+
+Next.js 16 requires Node 20.9+ and Cloudflare's default is older, so set `NODE_VERSION`
+explicitly or the build fails before it starts.
+
+**Why `trailingSlash: true`:** with static export, each route is emitted as
+`rejection/index.html` instead of `rejection.html`. Static hosts serve a directory's
+`index.html` but 404 on a bare `/rejection`, which breaks hard refreshes and bookmarks.
+
+### Any other static host
+
+`npm run build` produces `out/` — upload it to Netlify, GitHub Pages, S3, or behind nginx.
+
+### What this rules out
+
+Static export means no request-time server code: no API routes, no middleware, no server
+actions, no ISR, and no `next/image` optimisation. None of those are used today. If you later
+need shared data across users, that requires a backend and a host with a runtime — at which
+point drop `output: 'export'` and deploy to a Node-capable platform instead.
 
 ## Project Structure
 
@@ -70,8 +112,7 @@ src/
 │   ├── rework/               # Rework analysis
 │   ├── fqc-fallout/          # FQC fallout analysis
 │   ├── reports/              # Reports + CSV export
-│   ├── settings/             # App settings, clear imported data
-│   └── api/                  # API routes (empty-data endpoints)
+│   └── settings/             # App settings, clear imported data
 ├── components/
 │   ├── charts/               # Chart components + lazy barrel (index.tsx)
 │   ├── dashboard/            # Summary sections
@@ -85,8 +126,8 @@ src/
 │   ├── calculations/         # KPI and aggregation logic
 │   ├── constants/            # Company name, colors, column mappings
 │   ├── hooks/                # useQualityDerivations, useDebouncedValue
-│   ├── services/             # Excel parsing + data adapters
-│   └── utils/                # Formatters
+│   ├── services/             # Excel parsing and normalization
+│   └── utils/                # Formatters, shared record filters
 └── types/
     └── quality.ts            # Shared domain types
 ```
@@ -95,16 +136,24 @@ The `@/*` path alias maps to `./src/*`.
 
 ## Data Model
 
-Three record types, discriminated by `QualityType`:
+Three quality types, stored in two shapes:
 
-| Type | Description |
-| --- | --- |
-| `REJECTION` | Parts rejected during production |
-| `REWORK` | Parts requiring rework |
-| `FQC_FALLOUT` | Parts failing final quality check |
+| Type | Stored as | Description |
+| --- | --- | --- |
+| `REJECTION` | `QualityRecord` | Parts rejected during production |
+| `REWORK` | `QualityRecord` | Parts requiring rework |
+| `FQC_FALLOUT` | `FQCRecord` | Parts failing final quality check |
+
+FQC fallout is carried **only** by `FQCRecord`. A workbook row is never emitted as both a
+quality record and an FQC record, which is what keeps FQC quantities from being counted twice
+across the trend, line, part, and customer aggregations.
 
 Core interfaces live in `src/types/quality.ts` — `QualityRecord`, `FQCRecord`, `KPISummary`,
 and the aggregation result types (`DailyTrendItem`, `ParetoItem`, `MachineRankingItem`, etc.).
+
+Fields the source workbooks do not record are left empty rather than guessed: lot size and
+fallout rate are optional on `FQCRecord` and render as `N/A`, and `cell` falls back to the
+sheet-derived line when the free-text `Oprn.` column holds no usable value.
 
 ## Import Pipeline
 
@@ -116,6 +165,24 @@ All parsing is centralized in `src/lib/services/excelParser.ts`.
 4. **Normalize** — dates handled in multiple formats (`.`, `/`, ISO, Excel serial numbers)
 5. **Filter** — summary rows (`total`, `grand total`) and empty rows are dropped
 
+Parsing runs on a **Web Worker** so the UI never freezes mid-import. `excelParser.ts` is the pure
+parsing module; `parserWorker.ts` wraps it for the worker thread, and `excelImport.ts` decides
+where to run it — on the worker, falling back to the main thread if workers are unavailable,
+blocked by CSP, or fail to start. The file buffer is transferred rather than copied.
+
+Column resolution is **tiered** — exact match first, then prefix, then substring — and each
+column can only be claimed once. This matters for workbooks that carry both `cost per piece`
+and `total cost`: a plain substring search resolves both to the former and understates the
+cost of poor quality.
+
+Rows that cannot be placed in time or carry no quantity are skipped and reported as a
+`skippedRows` count in the import summary, rather than being stamped with today's date or
+given a quantity of 1.
+
+**Exclusion rule.** Records and sheets whose fields mention an excluded term (see
+`EXCLUDED_TERMS` in `src/lib/utils/qualityFilters.ts`) are dropped at import and again at
+aggregation, from one shared predicate so the two layers cannot drift apart.
+
 **Limits** (exceeding any raises a typed `ExcelImportError`):
 
 | Limit | Value |
@@ -125,6 +192,11 @@ All parsing is centralized in `src/lib/services/excelParser.ts`.
 | Max sheets per workbook | 50 |
 
 The parser is loaded on demand, not on first paint.
+
+**Chart animation is off.** Every Recharts series sets `isAnimationActive={CHART_ANIMATION_ACTIVE}`
+(`false`) from `src/components/charts/chartStyles.ts`. Recharts otherwise replays a 400 ms
+animation on every data change, which on this dashboard dominates every filter interaction —
+the aggregations themselves take ~1 ms.
 
 ## Architecture Notes
 
@@ -146,6 +218,12 @@ Using a value import for a type will silently drag the whole parser into the fir
 
 **Shared derivations.** Pages consume `useQualityDerivations()` rather than recomputing
 aggregations individually.
+
+**Filter changes are deferred, not debounced.** `useQualityDerivations` passes the filter
+object through `useDeferredValue` before it reaches the aggregations. This is deliberate and
+distinct from the 250 ms search debounce: it lets the filter control repaint immediately while
+the charts catch up at transition priority, which is what keeps INP down. Removing it makes
+every dropdown change rebuild all seven charts' SVG before the browser can paint.
 
 ## Security
 
@@ -169,5 +247,23 @@ project's agent instructions.
 npm audit          # 0 vulnerabilities
 npx tsc --noEmit   # 0 errors
 npm run lint       # 0 errors, 0 warnings
-npm run build      # 16/16 pages generated
+npm run build      # 10/10 pages generated
 ```
+
+The same gate runs in CI on demand. `.github/workflows/manual-test.yml` is
+`workflow_dispatch`-only — no `push`, `pull_request`, or `schedule` trigger — so it never
+runs by itself. Start it from **Actions → Manual Test → Run workflow**, or:
+
+```bash
+gh workflow run manual-test.yml
+```
+
+It installs with `npm ci`, audits, type-checks, lints, builds, then serves the static export
+over HTTP and requests every route (a route that returns 200 without rendering fails the run).
+Optionally it also boots `next dev` and repeats the route walk against the dev server.
+
+| Input | Default | Effect |
+| --- | --- | --- |
+| `node_version` | `22` | Node version to run the checks with |
+| `strict_audit` | off | Fail on any audit finding instead of only high/critical |
+| `run_dev_smoke` | on | Also boot `next dev` and request every route |

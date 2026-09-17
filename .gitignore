@@ -24,6 +24,10 @@
 .DS_Store
 *.pem
 
+# production quality workbooks — contain part numbers, operators and costs
+*.xlsx
+*.xls
+
 # debug
 npm-debug.log*
 yarn-debug.log*

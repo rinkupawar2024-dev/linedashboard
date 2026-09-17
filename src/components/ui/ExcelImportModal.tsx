@@ -249,6 +249,20 @@ export function ExcelImportModal() {
                 <strong className="text-[#FFFFFF]">Sheets Parsed:</strong>{' '}
                 {(previewResult?.summary.sheetsParsed || importSummary?.sheetsParsed || []).join(', ')}
               </div>
+
+              {(() => {
+                const skipped = previewResult?.summary.skippedRows ?? importSummary?.skippedRows ?? 0;
+                if (skipped === 0) return null;
+                return (
+                  <div className="text-[11px] text-[#FF9F0A] pt-1 flex items-start gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span>
+                      <strong className="text-[#FFFFFF]">{skipped}</strong> row
+                      {skipped === 1 ? '' : 's'} skipped — no readable date or quantity.
+                    </span>
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>

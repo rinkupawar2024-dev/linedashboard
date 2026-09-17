@@ -1,10 +1,8 @@
-import React from 'react';
 import { LucideIcon } from 'lucide-react';
 
 interface MetricItem {
   label: string;
   value: string;
-  subtext?: string;
   highlight?: boolean;
 }
 
@@ -127,9 +125,6 @@ export function KPICard({
               >
                 {m.value}
               </span>
-              {m.subtext && (
-                <span className="text-[10px] text-[#707070] mt-0.5">{m.subtext}</span>
-              )}
             </div>
           ))}
         </div>

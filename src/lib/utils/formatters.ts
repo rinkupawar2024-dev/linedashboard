@@ -1,19 +1,33 @@
 /**
  * Utility formatters for Indian Manufacturing & Corporate Quality metrics
+ *
+ * The Intl formatters are module-level singletons: constructing an
+ * Intl.NumberFormat / Intl.DateTimeFormat is roughly 50x more expensive than
+ * reusing one, and these run per table cell on every render.
  */
+
+const CURRENCY_FORMATTER = new Intl.NumberFormat('en-IN', {
+  style: 'currency',
+  currency: 'INR',
+  maximumFractionDigits: 0,
+});
+
+const NUMBER_FORMATTER = new Intl.NumberFormat('en-IN');
+
+const DATE_FORMATTER = new Intl.DateTimeFormat('en-IN', {
+  day: '2-digit',
+  month: 'short',
+  year: 'numeric',
+});
 
 export function formatCurrency(amount: number): string {
   if (isNaN(amount) || amount === null || amount === undefined) return '₹0';
-  return new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-    maximumFractionDigits: 0,
-  }).format(amount);
+  return CURRENCY_FORMATTER.format(amount);
 }
 
 export function formatNumber(value: number): string {
   if (isNaN(value) || value === null || value === undefined) return '0';
-  return new Intl.NumberFormat('en-IN').format(value);
+  return NUMBER_FORMATTER.format(value);
 }
 
 export function formatPercent(value: number | 'N/A' | undefined | null, decimals: number = 2): string {
@@ -25,31 +39,7 @@ export function formatPercent(value: number | 'N/A' | undefined | null, decimals
 
 export function formatDate(dateString: string): string {
   if (!dateString) return '';
-  try {
-    const d = new Date(dateString);
-    if (isNaN(d.getTime())) return dateString;
-    return d.toLocaleDateString('en-IN', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-    });
-  } catch {
-    return dateString;
-  }
-}
-
-export function formatShortDate(dateString: string): string {
-  if (!dateString) return '';
-  try {
-    const parts = dateString.split('-');
-    if (parts.length === 3) {
-      const day = parts[2];
-      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-      const monthIndex = parseInt(parts[1], 10) - 1;
-      return `${day} ${monthNames[monthIndex] || parts[1]}`;
-    }
-    return dateString;
-  } catch {
-    return dateString;
-  }
+  const date = new Date(dateString);
+  if (isNaN(date.getTime())) return dateString;
+  return DATE_FORMATTER.format(date);
 }
